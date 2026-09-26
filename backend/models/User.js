@@ -2,13 +2,14 @@ const { sql, poolPromise } = require('../config/db');
 
 async function findUserByEmail(email) {
   const pool = await poolPromise;
+  const cleanEmail = String(email || '').toLowerCase().trim();
   const result = await pool.request()
-    .input('email', sql.VarChar, email)
+    .input('email', sql.VarChar, cleanEmail)
     .query(`
       SELECT u.id, u.full_name, u.email, u.password_hash, u.role_id, r.name AS role_name
       FROM users u
       LEFT JOIN roles r ON u.role_id = r.id
-      WHERE u.email = @email
+      WHERE LOWER(u.email) = LOWER(@email)
     `);
   return result.recordset[0];
 }
