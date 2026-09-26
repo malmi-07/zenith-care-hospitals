@@ -1,4 +1,4 @@
-const { sql, poolPromise } = require('./db');
+const { poolPromise } = require('./db');
 const bcrypt = require('bcryptjs');
 
 async function initDb() {
@@ -9,13 +9,12 @@ async function initDb() {
       return;
     }
 
-    console.log('Initializing database schema and seed data...');
+    console.log('Initializing PostgreSQL database schema and seed data...');
 
     // 1. Roles table
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='roles' AND xtype='U')
-      CREATE TABLE roles (
-        id INT IDENTITY(1,1) PRIMARY KEY,
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS roles (
+        id SERIAL PRIMARY KEY,
         name VARCHAR(50) NOT NULL UNIQUE
       );
     `);
@@ -33,24 +32,21 @@ async function initDb() {
 
     for (const roleName of roles) {
       await pool.request()
-        .input('name', sql.VarChar, roleName)
+        .input('name', roleName)
         .query(`
-          IF NOT EXISTS (SELECT 1 FROM roles WHERE name = @name)
-          INSERT INTO roles (name) VALUES (@name);
+          INSERT INTO roles (name) VALUES (@name)
+          ON CONFLICT (name) DO NOTHING;
         `);
     }
 
     // 2. Departments table
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='departments' AND xtype='U')
-      CREATE TABLE departments (
-        id INT IDENTITY(1,1) PRIMARY KEY,
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS departments (
+        id SERIAL PRIMARY KEY,
         name VARCHAR(100) NOT NULL UNIQUE,
         description VARCHAR(255) NULL
       );
-
-      IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('departments') AND name = 'description')
-      ALTER TABLE departments ADD description VARCHAR(255) NULL;
+      ALTER TABLE departments ADD COLUMN IF NOT EXISTS description VARCHAR(255) NULL;
     `);
 
     const departments = [
@@ -64,24 +60,23 @@ async function initDb() {
 
     for (const dept of departments) {
       await pool.request()
-        .input('name', sql.VarChar, dept.name)
-        .input('desc', sql.VarChar, dept.description)
+        .input('name', dept.name)
+        .input('desc', dept.description)
         .query(`
-          IF NOT EXISTS (SELECT 1 FROM departments WHERE name = @name)
-          INSERT INTO departments (name, description) VALUES (@name, @desc);
+          INSERT INTO departments (name, description) VALUES (@name, @desc)
+          ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description;
         `);
     }
 
     // 3. Users table
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='users' AND xtype='U')
-      CREATE TABLE users (
-        id INT IDENTITY(1,1) PRIMARY KEY,
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
         full_name VARCHAR(100) NOT NULL,
         email VARCHAR(100) NOT NULL UNIQUE,
         password_hash VARCHAR(255) NOT NULL,
-        role_id INT FOREIGN KEY REFERENCES roles(id),
-        created_at DATETIME DEFAULT GETDATE()
+        role_id INT REFERENCES roles(id),
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
@@ -100,38 +95,37 @@ async function initDb() {
 
     for (const demo of demoAccounts) {
       const roleRes = await pool.request()
-        .input('rName', sql.VarChar, demo.role)
+        .input('rName', demo.role)
         .query('SELECT id FROM roles WHERE name = @rName');
       const roleId = roleRes.recordset[0]?.id;
 
       if (roleId) {
         const hash = await bcrypt.hash(demo.password, 10);
         await pool.request()
-          .input('name', sql.VarChar, demo.name)
-          .input('email', sql.VarChar, demo.email)
-          .input('hash', sql.VarChar, hash)
-          .input('roleId', sql.Int, roleId)
+          .input('name', demo.name)
+          .input('email', demo.email)
+          .input('hash', hash)
+          .input('roleId', roleId)
           .query(`
-            IF EXISTS (SELECT 1 FROM users WHERE email = @email)
-              UPDATE users SET full_name=@name, password_hash=@hash, role_id=@roleId WHERE email=@email;
-            ELSE
-              INSERT INTO users (full_name, email, password_hash, role_id) VALUES (@name, @email, @hash, @roleId);
+            INSERT INTO users (full_name, email, password_hash, role_id)
+            VALUES (@name, @email, @hash, @roleId)
+            ON CONFLICT (email) DO UPDATE
+            SET full_name = EXCLUDED.full_name, password_hash = EXCLUDED.password_hash, role_id = EXCLUDED.role_id;
           `);
       }
     }
 
     // Also update existing admin@test.com if present
     await pool.request()
-      .input('hash', sql.VarChar, defaultPasswordHash)
+      .input('hash', defaultPasswordHash)
       .query(`
         UPDATE users SET password_hash = @hash WHERE email = 'admin@test.com';
       `);
 
     // 4. Patients table
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='patients' AND xtype='U')
-      CREATE TABLE patients (
-        id INT IDENTITY(1,1) PRIMARY KEY,
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS patients (
+        id SERIAL PRIMARY KEY,
         full_name VARCHAR(100) NOT NULL,
         dob DATE NULL,
         gender VARCHAR(10) NULL,
@@ -139,23 +133,16 @@ async function initDb() {
         address VARCHAR(255) NULL,
         blood_group VARCHAR(10) NULL,
         emergency_contact VARCHAR(50) NULL,
-        created_at DATETIME DEFAULT GETDATE()
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
-    `);
-
-    // Ensure blood_group and emergency_contact columns exist if table was already created
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('patients') AND name = 'blood_group')
-      ALTER TABLE patients ADD blood_group VARCHAR(10) NULL;
-
-      IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('patients') AND name = 'emergency_contact')
-      ALTER TABLE patients ADD emergency_contact VARCHAR(50) NULL;
+      ALTER TABLE patients ADD COLUMN IF NOT EXISTS blood_group VARCHAR(10) NULL;
+      ALTER TABLE patients ADD COLUMN IF NOT EXISTS emergency_contact VARCHAR(50) NULL;
     `);
 
     // Seed sample patients if less than 3
-    const patCount = await pool.request().query('SELECT COUNT(*) AS count FROM patients');
-    if (patCount.recordset[0].count < 3) {
-      await pool.request().query(`
+    const patCount = await pool.query('SELECT COUNT(*) AS count FROM patients');
+    if (parseInt(patCount.recordset[0].count, 10) < 3) {
+      await pool.query(`
         INSERT INTO patients (full_name, dob, gender, phone, address, blood_group, emergency_contact) VALUES
         ('Amara Wickrama', '1985-11-20', 'F', '0718882233', '45 Galle Rd, Colombo', 'A+', '0714445552'),
         ('Michael Chang', '1978-03-10', 'M', '0765551122', '88 Hill St, Nuwara Eliya', 'B+', '0763332211');
@@ -163,19 +150,18 @@ async function initDb() {
     }
 
     // 5. Doctors table
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='doctors' AND xtype='U')
-      CREATE TABLE doctors (
-        id INT IDENTITY(1,1) PRIMARY KEY,
-        user_id INT FOREIGN KEY REFERENCES users(id),
-        department_id INT FOREIGN KEY REFERENCES departments(id),
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS doctors (
+        id SERIAL PRIMARY KEY,
+        user_id INT REFERENCES users(id),
+        department_id INT REFERENCES departments(id),
         specialization VARCHAR(100) NULL,
-        schedule VARCHAR(MAX) NULL
+        schedule TEXT NULL
       );
     `);
 
     // Seed doctors linking to Dr. Sarah and Dr. David
-    const docUsers = await pool.request().query(`
+    const docUsers = await pool.query(`
       SELECT u.id, u.email FROM users u WHERE u.email IN ('sarah@hms.com', 'david@hms.com')
     `);
 
@@ -186,109 +172,101 @@ async function initDb() {
       const deptId = isCardio ? 1 : 3;
 
       await pool.request()
-        .input('userId', sql.Int, dUser.id)
-        .input('deptId', sql.Int, deptId)
-        .input('spec', sql.VarChar, spec)
-        .input('sched', sql.VarChar, sched)
+        .input('userId', dUser.id)
+        .input('deptId', deptId)
+        .input('spec', spec)
+        .input('sched', sched)
         .query(`
-          IF NOT EXISTS (SELECT 1 FROM doctors WHERE user_id = @userId)
           INSERT INTO doctors (user_id, department_id, specialization, schedule)
-          VALUES (@userId, @deptId, @spec, @sched);
+          VALUES (@userId, @deptId, @spec, @sched)
+          ON CONFLICT DO NOTHING;
         `);
     }
 
     // 6. Appointments table
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='appointments' AND xtype='U')
-      CREATE TABLE appointments (
-        id INT IDENTITY(1,1) PRIMARY KEY,
-        patient_id INT FOREIGN KEY REFERENCES patients(id),
-        doctor_id INT FOREIGN KEY REFERENCES doctors(id),
-        appointment_date DATETIME NOT NULL,
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS appointments (
+        id SERIAL PRIMARY KEY,
+        patient_id INT REFERENCES patients(id),
+        doctor_id INT REFERENCES doctors(id),
+        appointment_date TIMESTAMPTZ NOT NULL,
         status VARCHAR(20) DEFAULT 'Scheduled',
         notes VARCHAR(255) NULL
       );
-
-      IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('appointments') AND name = 'notes')
-      ALTER TABLE appointments ADD notes VARCHAR(255) NULL;
+      ALTER TABLE appointments ADD COLUMN IF NOT EXISTS notes VARCHAR(255) NULL;
     `);
 
     // 7. Medical Records (EMR) table
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='medical_records' AND xtype='U')
-      CREATE TABLE medical_records (
-        id INT IDENTITY(1,1) PRIMARY KEY,
-        patient_id INT FOREIGN KEY REFERENCES patients(id),
-        doctor_id INT FOREIGN KEY REFERENCES doctors(id),
-        diagnosis VARCHAR(MAX) NULL,
-        prescription VARCHAR(MAX) NULL,
-        treatment_history VARCHAR(MAX) NULL,
-        visit_date DATETIME DEFAULT GETDATE()
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS medical_records (
+        id SERIAL PRIMARY KEY,
+        patient_id INT REFERENCES patients(id),
+        doctor_id INT REFERENCES doctors(id),
+        diagnosis TEXT NULL,
+        prescription TEXT NULL,
+        treatment_history TEXT NULL,
+        visit_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
-
-      IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('medical_records') AND name = 'treatment_history')
-      ALTER TABLE medical_records ADD treatment_history VARCHAR(MAX) NULL;
+      ALTER TABLE medical_records ADD COLUMN IF NOT EXISTS treatment_history TEXT NULL;
     `);
 
     // Seed sample medical record if empty
-    const mrCount = await pool.request().query('SELECT COUNT(*) AS count FROM medical_records');
-    if (mrCount.recordset[0].count === 0) {
-      await pool.request().query(`
+    const mrCount = await pool.query('SELECT COUNT(*) AS count FROM medical_records');
+    if (parseInt(mrCount.recordset[0].count, 10) === 0) {
+      await pool.query(`
         INSERT INTO medical_records (patient_id, doctor_id, diagnosis, prescription, treatment_history, visit_date)
         VALUES (
           1, 1,
           'Hypertension Stage 1, mild arrhythmia detected.',
           'Amlodipine 5mg once daily; Aspirin 75mg daily after food.',
           'Follow-up scheduled in 4 weeks. Advised low-sodium diet and daily walking.',
-          GETDATE()
+          CURRENT_TIMESTAMP
         );
       `);
     }
 
     // 8. Laboratory Tests table
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='laboratory_tests' AND xtype='U')
-      CREATE TABLE laboratory_tests (
-        id INT IDENTITY(1,1) PRIMARY KEY,
-        patient_id INT FOREIGN KEY REFERENCES patients(id),
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS laboratory_tests (
+        id SERIAL PRIMARY KEY,
+        patient_id INT REFERENCES patients(id),
         doctor_id INT NULL,
         test_name VARCHAR(150) NOT NULL,
         category VARCHAR(100) DEFAULT 'Biochemistry',
         sample_status VARCHAR(50) DEFAULT 'Pending',
-        result VARCHAR(MAX) NULL,
+        result TEXT NULL,
         status VARCHAR(30) DEFAULT 'Requested',
         cost DECIMAL(10,2) DEFAULT 1500.00,
-        requested_at DATETIME DEFAULT GETDATE(),
-        completed_at DATETIME NULL
+        requested_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMPTZ NULL
       );
     `);
 
     // Seed sample lab tests if empty
-    const labCount = await pool.request().query('SELECT COUNT(*) AS count FROM laboratory_tests');
-    if (labCount.recordset[0].count === 0) {
-      const pats = await pool.request().query('SELECT TOP 3 id FROM patients ORDER BY id ASC');
+    const labCount = await pool.query('SELECT COUNT(*) AS count FROM laboratory_tests');
+    if (parseInt(labCount.recordset[0].count, 10) === 0) {
+      const pats = await pool.query('SELECT id FROM patients ORDER BY id ASC LIMIT 3');
       const p1 = pats.recordset[0]?.id || 1;
       const p2 = pats.recordset[1]?.id || p1;
       const p3 = pats.recordset[2]?.id || p1;
 
       await pool.request()
-        .input('p1', sql.Int, p1)
-        .input('p2', sql.Int, p2)
-        .input('p3', sql.Int, p3)
+        .input('p1', p1)
+        .input('p2', p2)
+        .input('p3', p3)
         .query(`
           INSERT INTO laboratory_tests (patient_id, doctor_id, test_name, category, sample_status, result, status, cost, requested_at)
           VALUES
-          (@p1, 1, 'Full Blood Count (FBC)', 'Hematology', 'Collected', 'Hemoglobin 14.2 g/dL, WBC 6,800 /uL, Platelets 260,000 /uL. All normal.', 'Completed', 1200.00, DATEADD(hour, -5, GETDATE())),
-          (@p2, 1, 'Lipid Profile', 'Biochemistry', 'Pending', NULL, 'In Progress', 2500.00, DATEADD(hour, -2, GETDATE())),
-          (@p3, 2, 'Chest X-Ray Digital', 'Radiology', 'Completed', 'Clear lung fields, cardiac contour within normal limits.', 'Completed', 3500.00, DATEADD(day, -1, GETDATE()));
+          (@p1, 1, 'Full Blood Count (FBC)', 'Hematology', 'Collected', 'Hemoglobin 14.2 g/dL, WBC 6,800 /uL, Platelets 260,000 /uL. All normal.', 'Completed', 1200.00, CURRENT_TIMESTAMP - INTERVAL '5 hours'),
+          (@p2, 1, 'Lipid Profile', 'Biochemistry', 'Pending', NULL, 'In Progress', 2500.00, CURRENT_TIMESTAMP - INTERVAL '2 hours'),
+          (@p3, 2, 'Chest X-Ray Digital', 'Radiology', 'Completed', 'Clear lung fields, cardiac contour within normal limits.', 'Completed', 3500.00, CURRENT_TIMESTAMP - INTERVAL '1 day');
         `);
     }
 
     // 9. Pharmacy Inventory table
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='pharmacy_inventory' AND xtype='U')
-      CREATE TABLE pharmacy_inventory (
-        id INT IDENTITY(1,1) PRIMARY KEY,
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS pharmacy_inventory (
+        id SERIAL PRIMARY KEY,
         name VARCHAR(150) NOT NULL,
         generic_name VARCHAR(150) NULL,
         category VARCHAR(100) NULL,
@@ -302,9 +280,9 @@ async function initDb() {
     `);
 
     // Seed sample pharmacy drugs if empty
-    const pharmCount = await pool.request().query('SELECT COUNT(*) AS count FROM pharmacy_inventory');
-    if (pharmCount.recordset[0].count === 0) {
-      await pool.request().query(`
+    const pharmCount = await pool.query('SELECT COUNT(*) AS count FROM pharmacy_inventory');
+    if (parseInt(pharmCount.recordset[0].count, 10) === 0) {
+      await pool.query(`
         INSERT INTO pharmacy_inventory (name, generic_name, category, dosage, stock_quantity, unit_price, expiry_date, reorder_level, supplier)
         VALUES
         ('Amoxil 500mg', 'Amoxicillin', 'Antibiotics', '500mg Capsule', 150, 45.00, '2027-08-30', 30, 'PharmaCare Ltd'),
@@ -316,59 +294,45 @@ async function initDb() {
     }
 
     // 10. Billing table & Payment tracking
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='billing' AND xtype='U')
-      CREATE TABLE billing (
-        id INT IDENTITY(1,1) PRIMARY KEY,
-        patient_id INT FOREIGN KEY REFERENCES patients(id),
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS billing (
+        id SERIAL PRIMARY KEY,
+        patient_id INT REFERENCES patients(id),
         invoice_number VARCHAR(50) NULL,
         amount DECIMAL(10,2) NOT NULL,
         description VARCHAR(255) NULL,
         charge_type VARCHAR(50) DEFAULT 'Consultation',
         status VARCHAR(20) DEFAULT 'Pending',
         payment_method VARCHAR(50) DEFAULT 'Cash',
-        created_at DATETIME DEFAULT GETDATE(),
-        paid_at DATETIME NULL
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        paid_at TIMESTAMPTZ NULL
       );
-    `);
-
-    // Ensure columns exist on billing table
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('billing') AND name = 'invoice_number')
-      ALTER TABLE billing ADD invoice_number VARCHAR(50) NULL;
-
-      IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('billing') AND name = 'charge_type')
-      ALTER TABLE billing ADD charge_type VARCHAR(50) DEFAULT 'Consultation';
-
-      IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('billing') AND name = 'payment_method')
-      ALTER TABLE billing ADD payment_method VARCHAR(50) DEFAULT 'Cash';
-
-      IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('billing') AND name = 'paid_at')
-      ALTER TABLE billing ADD paid_at DATETIME NULL;
+      ALTER TABLE billing ADD COLUMN IF NOT EXISTS invoice_number VARCHAR(50) NULL;
+      ALTER TABLE billing ADD COLUMN IF NOT EXISTS charge_type VARCHAR(50) DEFAULT 'Consultation';
+      ALTER TABLE billing ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50) DEFAULT 'Cash';
+      ALTER TABLE billing ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ NULL;
     `);
 
     // 11. Staff Management table
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='staff' AND xtype='U')
-      CREATE TABLE staff (
-        id INT IDENTITY(1,1) PRIMARY KEY,
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS staff (
+        id SERIAL PRIMARY KEY,
         full_name VARCHAR(100) NOT NULL,
         role VARCHAR(50) NOT NULL,
-        department_id INT FOREIGN KEY REFERENCES departments(id),
+        department_id INT REFERENCES departments(id),
         email VARCHAR(100) NULL,
         phone VARCHAR(20) NULL,
-        join_date DATE DEFAULT GETDATE(),
+        join_date DATE DEFAULT CURRENT_DATE,
         status VARCHAR(20) DEFAULT 'Active'
       );
     `);
 
     // 12. Staff Attendance table
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='staff_attendance' AND xtype='U')
-      CREATE TABLE staff_attendance (
-        id INT IDENTITY(1,1) PRIMARY KEY,
-        staff_id INT FOREIGN KEY REFERENCES staff(id),
-        date DATE DEFAULT GETDATE(),
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS staff_attendance (
+        id SERIAL PRIMARY KEY,
+        staff_id INT REFERENCES staff(id),
+        date DATE DEFAULT CURRENT_DATE,
         status VARCHAR(20) DEFAULT 'Present',
         check_in VARCHAR(10) NULL,
         check_out VARCHAR(10) NULL
@@ -376,11 +340,10 @@ async function initDb() {
     `);
 
     // 13. Staff Leaves table
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='staff_leaves' AND xtype='U')
-      CREATE TABLE staff_leaves (
-        id INT IDENTITY(1,1) PRIMARY KEY,
-        staff_id INT FOREIGN KEY REFERENCES staff(id),
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS staff_leaves (
+        id SERIAL PRIMARY KEY,
+        staff_id INT REFERENCES staff(id),
         leave_type VARCHAR(50) NOT NULL,
         start_date DATE NOT NULL,
         end_date DATE NOT NULL,
@@ -390,9 +353,9 @@ async function initDb() {
     `);
 
     // Seed staff if empty
-    const staffCount = await pool.request().query('SELECT COUNT(*) AS count FROM staff');
-    if (staffCount.recordset[0].count === 0) {
-      await pool.request().query(`
+    const staffCount = await pool.query('SELECT COUNT(*) AS count FROM staff');
+    if (parseInt(staffCount.recordset[0].count, 10) === 0) {
+      await pool.query(`
         INSERT INTO staff (full_name, role, department_id, email, phone, join_date, status)
         VALUES
         ('Dr. Sarah Perera', 'Chief Doctor', 1, 'sarah@hms.com', '0771122334', '2023-01-15', 'Active'),
@@ -403,9 +366,9 @@ async function initDb() {
       `);
     }
 
-    console.log('Database initialization and seeding completed successfully!');
+    console.log('PostgreSQL database initialization and seeding completed successfully!');
   } catch (err) {
-    console.error('Error during database initialization:', err);
+    console.error('Error during PostgreSQL database initialization:', err);
   }
 }
 

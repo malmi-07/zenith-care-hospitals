@@ -1,27 +1,49 @@
-const sql = require('mssql');
+const { Pool } = require('pg');
 require('dotenv').config();
 
-const config = {
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  server: process.env.DB_SERVER,
-  database: process.env.DB_DATABASE,
-  port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 1433,
-  options: {
-    encrypt: process.env.DB_ENCRYPT !== 'false',
-    trustServerCertificate: process.env.DB_TRUST_CERT !== 'false'
-  }
-};
+const connectionString =
+  process.env.DATABASE_PRIVATE_URL ||
+  process.env.DATABASE_URL ||
+  process.env.POSTGRES_URL;
 
-const poolPromise = new sql.ConnectionPool(config)
-  .connect()
-  .then(pool => {
-    console.log('Connected to SQL Server');
-    return pool;
-  })
-  .catch(err => {
-    console.error('DB Connection Failed:', err.message || err);
-    return null;
+let pool;
+
+if (connectionString) {
+  pool = new Pool({
+    connectionString,
+    ssl: process.env.DB_ENCRYPT === 'true' || process.env.NODE_ENV === 'production'
+      ? { rejectUnauthorized: false }
+      : false,
   });
+} else {
+  pool = new Pool({
+    user: process.env.DB_USER || process.env.PGUSER || 'postgres',
+    password: process.env.DB_PASSWORD || process.env.PGPASSWORD || 'postgres',
+    host: process.env.DB_SERVER || process.env.PGHOST || 'localhost',
+    database: process.env.DB_DATABASE || process.env.PGDATABASE || 'hms_db',
+    port: process.env.DB_PORT || process.env.PGPORT || 5432,
+    ssl: process.env.DB_ENCRYPT === 'true' ? { rejectUnauthorized: false } : false,
+  });
+}
 
-module.exports = { sql, poolPromise };
+pool.on('connect', () => {
+  console.log('Connected to PostgreSQL Database');
+});
+
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle PostgreSQL client', err);
+});
+
+// Helper for queries
+async function query(text, params) {
+  const start = Date.now();
+  const res = await pool.query(text, params);
+  const duration = Date.now() - start;
+  return res;
+}
+
+module.exports = {
+  pool,
+  query,
+  poolPromise: Promise.resolve(pool)
+};
