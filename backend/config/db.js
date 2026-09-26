@@ -46,8 +46,9 @@ function convertTsSqlToPostgres(sql, inputs = {}) {
   // Replace @param with $1, $2, ...
   const inputKeys = Object.keys(inputs);
   for (const key of inputKeys) {
-    const regex = new RegExp(`@${key}\\b`, 'g');
-    if (regex.test(pgSql)) {
+    const target = `@${key}`;
+    if (pgSql.includes(target)) {
+      const regex = new RegExp(`@${key}\\b`, 'g');
       values.push(inputs[key]);
       pgSql = pgSql.replace(regex, `$${paramIndex}`);
       paramIndex++;
