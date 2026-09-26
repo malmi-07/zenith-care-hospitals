@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "MediCare HMS - Hospital Management & Clinical Care System",
   "scripts": {
-    "predev": "kill-port 3000 5000 || true",
+    "predev": "npx kill-port 3000 5000 || exit 0",
     "dev": "concurrently --kill-others --prefix-colors \"cyan,magenta\" --names \"BACKEND,FRONTEND\" \"npm run dev --prefix backend\" \"npm start --prefix frontend\"",
     "backend": "npm run dev --prefix backend",
     "frontend": "npm start --prefix frontend"
