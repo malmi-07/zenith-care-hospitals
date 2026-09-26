@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import api from '../../api/axios';
 import { 
   BarChart3, TrendingUp, Users, DollarSign, 
-  Calendar, PieChart, RefreshCw, CheckCircle2, Shield
+  Calendar, PieChart
 } from 'lucide-react';
 
 function ReportsView() {

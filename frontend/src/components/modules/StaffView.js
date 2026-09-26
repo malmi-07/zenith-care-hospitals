@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import api from '../../api/axios';
 import { 
   UserCheck, UserPlus, Clock, Calendar, Search, 
-  CheckCircle2, XCircle, X, Check, AlertCircle, Building2, Mail, Phone
+  X, AlertCircle, Building2
 } from 'lucide-react';
 
 function StaffView() {
