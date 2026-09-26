@@ -6,9 +6,10 @@ const config = {
   password: process.env.DB_PASSWORD,
   server: process.env.DB_SERVER,
   database: process.env.DB_DATABASE,
+  port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 1433,
   options: {
-    encrypt: true,
-    trustServerCertificate: true
+    encrypt: process.env.DB_ENCRYPT !== 'false',
+    trustServerCertificate: process.env.DB_TRUST_CERT !== 'false'
   }
 };
 
@@ -18,6 +19,9 @@ const poolPromise = new sql.ConnectionPool(config)
     console.log('Connected to SQL Server');
     return pool;
   })
-  .catch(err => console.error('DB Connection Failed:', err));
+  .catch(err => {
+    console.error('DB Connection Failed:', err.message || err);
+    return null;
+  });
 
 module.exports = { sql, poolPromise };

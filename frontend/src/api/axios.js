@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const api = axios.create({
-  baseURL: 'https://zenith-care-hospitals-production.up.railway.app/api',
+  baseURL: process.env.REACT_APP_API_URL || 'https://zenith-care-hospitals-production.up.railway.app/api',
 });
 
 api.interceptors.request.use((config) => {
