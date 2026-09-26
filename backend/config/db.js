@@ -6,17 +6,17 @@ const connectionString =
   process.env.DATABASE_URL ||
   process.env.POSTGRES_URL;
 
-let pool;
+let rawPool;
 
 if (connectionString) {
-  pool = new Pool({
+  rawPool = new Pool({
     connectionString,
     ssl: process.env.DB_ENCRYPT === 'true' || process.env.NODE_ENV === 'production'
       ? { rejectUnauthorized: false }
       : false,
   });
 } else {
-  pool = new Pool({
+  rawPool = new Pool({
     user: process.env.DB_USER || process.env.PGUSER || 'postgres',
     password: process.env.DB_PASSWORD || process.env.PGPASSWORD || 'postgres',
     host: process.env.DB_SERVER || process.env.PGHOST || 'localhost',
@@ -26,24 +26,92 @@ if (connectionString) {
   });
 }
 
-pool.on('connect', () => {
+rawPool.on('connect', () => {
   console.log('Connected to PostgreSQL Database');
 });
 
-pool.on('error', (err) => {
+rawPool.on('error', (err) => {
   console.error('Unexpected error on idle PostgreSQL client', err);
 });
 
-// Helper for queries
-async function query(text, params) {
-  const start = Date.now();
-  const res = await pool.query(text, params);
-  const duration = Date.now() - start;
-  return res;
+// Convert T-SQL query string to Postgres SQL
+function convertTsSqlToPostgres(sql, inputs = {}) {
+  let pgSql = sql;
+  const values = [];
+  let paramIndex = 1;
+
+  // Transform OUTPUT INSERTED.id -> RETURNING id
+  pgSql = pgSql.replace(/OUTPUT\s+INSERTED\.(\w+)/gi, 'RETURNING $1');
+
+  // Replace @param with $1, $2, ...
+  const inputKeys = Object.keys(inputs);
+  for (const key of inputKeys) {
+    const regex = new RegExp(`@${key}\\b`, 'g');
+    if (regex.test(pgSql)) {
+      values.push(inputs[key]);
+      pgSql = pgSql.replace(regex, `$${paramIndex}`);
+      paramIndex++;
+    }
+  }
+
+  return { text: pgSql, values };
 }
 
+class PostgresRequestAdapter {
+  constructor(pgPool) {
+    this.pgPool = pgPool;
+    this.inputs = {};
+  }
+
+  input(name, typeOrValue, value) {
+    const actualValue = value !== undefined ? value : typeOrValue;
+    this.inputs[name] = actualValue;
+    return this;
+  }
+
+  async query(sqlString) {
+    const { text, values } = convertTsSqlToPostgres(sqlString, this.inputs);
+    try {
+      const res = await this.pgPool.query(text, values);
+      return {
+        recordset: res.rows,
+        rows: res.rows,
+        rowsAffected: [res.rowCount],
+      };
+    } catch (err) {
+      console.error('PostgreSQL Query Error:', err.message, 'Query:', text);
+      throw err;
+    }
+  }
+}
+
+// Wrapper pool object
+const poolWrapper = {
+  request() {
+    return new PostgresRequestAdapter(rawPool);
+  },
+  async query(text, params) {
+    if (params) {
+      const res = await rawPool.query(text, params);
+      return { recordset: res.rows, rows: res.rows };
+    }
+    const { text: pgSql, values } = convertTsSqlToPostgres(text);
+    const res = await rawPool.query(pgSql, values);
+    return { recordset: res.rows, rows: res.rows };
+  }
+};
+
+const sqlMock = {
+  VarChar: 'VarChar',
+  Int: 'Int',
+  Decimal: 'Decimal',
+  DateTime: 'DateTime',
+  Date: 'Date',
+  Text: 'Text',
+};
+
 module.exports = {
-  pool,
-  query,
-  poolPromise: Promise.resolve(pool)
+  pool: poolWrapper,
+  sql: sqlMock,
+  poolPromise: Promise.resolve(poolWrapper),
 };
